@@ -1,0 +1,90 @@
+pipeline {
+    agent none
+    stages {
+        stage('Maven Stages') {
+            agent {
+                docker {
+                    image 'maven:3.8.8-eclipse-temurin-17-alpine'
+                }
+            }
+            stages {
+                stage('Validate') {
+                    steps {
+                        sh 'mvn validate -B -ntp'
+                    }
+                }
+
+                stage('Compile') {
+                    steps {
+                        sh 'mvn compile -B -ntp'
+                    }
+                }
+
+                stage('Test') {
+                    steps {
+                        sh 'mvn clean test -B -ntp'
+                    }
+                    post {
+                        success {
+                            junit 'target/surefire-reports/*.xml'
+                            jacoco(execPattern: 'target/jacoco.exec')
+                        }
+                    }
+                }
+
+                stage('Verify') {
+                    steps {
+                        sh 'mvn verify -B -ntp'
+                    }
+                }
+
+                stage('Package') {
+                    steps {
+                        sh 'mvn package -DskipTests -B -ntp'
+                    }
+                }
+
+                stage('SonarQube') {
+                    steps {
+                        script {
+                            def branch = env.GIT_BRANCH?.split('/')?.last() ?: 'master'
+                            echo "branch: ${branch}"
+                            withSonarQubeEnv('sonarqube') {
+                                sh "mvn sonar:sonar -Dsonar.branch.name=${branch} -B -ntp"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 3, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Docker Image') {
+            agent any
+            options { skipDefaultCheckout() }
+            steps {
+                sh 'docker --version'
+                script {
+                    def pom = readMavenPom file: 'pom.xml'
+                    sh 'docker buildx version'
+                    withCredentials([usernamePassword(credentialsId: 'dockerhub-credentials', passwordVariable: 'DOCKER_PASSWORD', usernameVariable: 'DOCKER_USERNAME')]) {
+                        sh 'echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin'
+                        sh """
+                            docker buildx build \
+                                -t guilleferru/${pom.artifactId}:${pom.version} \
+                                -t guilleferru/${pom.artifactId}:latest \
+                                --platform linux/amd64,linux/arm64 --push .
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
